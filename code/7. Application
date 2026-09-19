@@ -48,26 +48,21 @@ dim(f)
 dat_hrs<-f[,1:12]
 cor<-f[,13:34]
 
-#cor[,12]<-apply(cor[,1:11],1,function(x){if(all(x==0)==TRUE){
-#  return(0)
-#} else if(all(x==1)==TRUE) {
-#  return(1)
-#} else {
-#  return(2)
-#}})
-colnames(dat_hrs)
-for(i in 1:11){
-  dat_hrs[which(dat_hrs[,i+1]<=6),12+i]<-3
-  dat_hrs[which(dat_hrs[,i+1]>6&dat_hrs[,i+1]<=11),12+i]<-2
-  dat_hrs[which(dat_hrs[,i+1]>11&dat_hrs[,i+1]<=27),12+i]<-1
+for (i in 1:11) {
+  dat_hrs[which(dat_hrs[, i + 1] <= 6), 12 + i] <- 3
+  dat_hrs[which(dat_hrs[, i + 1] > 6 & dat_hrs[, i + 1] <= 11), 12 + i] <- 2
+  dat_hrs[which(dat_hrs[, i + 1] > 11 & dat_hrs[, i + 1] <= 27), 12 + i] <- 1
 }
+keep_subject <- which(dat_hrs[, 13] == 3)
+dat_hrs <- dat_hrs[-keep_subject, ]
+cor <- cor[-keep_subject, ]
+
 for(i in 1:22){
   cor[,22+i]<-cut(cor[,i],c(0,3,Inf),c(0,1))
 }
-#定义是否为both impairment
 for(i in 1:11){
-  cor[which(cor[,22+i]==1&cor[,33+i]==1),44+i]<-1
-  cor[which(cor[,22+i]==0|cor[,33+i]==0),44+i]<-0
+  cor[which(cor[,22+i]==1|cor[,33+i]==1),44+i]<-1
+  cor[which(cor[,22+i]==0&cor[,33+i]==0),44+i]<-0
 }
 
 colnames(cor)
@@ -77,10 +72,9 @@ cor<-cor[,c(23:55)]#3-13wave hearing,3-13wave eyesight,3-13both impairment
 hrs_dat_original<-cbind(dat_hrs,cor)
 write.csv(hrs_dat_original,"~/Desktop/BCMC_result/hrs/hrs_dat_original.csv")
 
+for(R in 1:100){
 dat_hrs<-hrs_dat_original
-install.packages("expm")
 library(expm)
-install.packages("expm", type = "binary")
 p_list_s<- c(rep(0, 3*3*10))
 dim(p_list_s)<-c(3,3,10)
 dat<-dat_hrs[,13:23]
@@ -93,9 +87,9 @@ for (i in 1:10){
   p[1,2]<-length(which(dat[,i]==1&dat[,i+1]==2))/num
   p[1,3]<-length(which(dat[,i]==1&dat[,i+1]==3))/num
   num2<-length(which(dat[,i]==2))
-  p[2,1]<-length(which(dat[,i]==2&dat[,i+1]==1))/num
-  p[2,2]<-length(which(dat[,i]==2&dat[,i+1]==2))/num
-  p[2,3]<-length(which(dat[,i]==2&dat[,i+1]==3))/num
+  p[2,1]<-length(which(dat[,i]==2&dat[,i+1]==1))/num2
+  p[2,2]<-length(which(dat[,i]==2&dat[,i+1]==2))/num2
+  p[2,3]<-length(which(dat[,i]==2&dat[,i+1]==3))/num2
   p[3,1]<-0
   p[3,2]<-0
   p[3,3]<-1
@@ -104,10 +98,22 @@ for (i in 1:10){
 k<-40
 p_list_s_ste<- c(rep(0, 3*3*k))
 dim(p_list_s_ste)<-c(3,3,k)
-for(i in 1:10){
-  p_list_s_ste[,,((i-1)*4+1):((i-1)*4+4)]<-abs((sqrtm(sqrtm(p_list_s[,,i]))))
+for (i in 1:10) {
+  p_step <- Re(sqrtm(sqrtm(p_list_s[, , i])))
+  p_step[p_step < 0] <- 0
+
+  for (state_i in 1:3) {
+    row_total <- sum(p_step[state_i, ])
+    if (is.finite(row_total) && row_total > 0) {
+      p_step[state_i, ] <- p_step[state_i, ] / row_total
+    } else {
+      p_step[state_i, ] <- diag(3)[state_i, ]
+    }
+  }
+
+  p_list_s_ste[, , ((i - 1) * 4 + 1):((i - 1) * 4 + 4)] <- p_step
 }
-p_list_s_ste
+
 
 
 k<-40
@@ -133,7 +139,6 @@ data_1<-foreach(i = 1:n,
   da<-c(current_state)
   # Store sample sequences
   for(t in 1:k){
-    set.seed(123)
     next_state <- sample(1:states, 1, prob = p_list_s_ste[current_state,,t])
   da<- c(da,next_state)
   current_state<-next_state
@@ -143,16 +148,17 @@ data_1<-foreach(i = 1:n,
 stopCluster(cl)
 wide_data_1<- as.data.frame(data_1)
 colnames(wide_data_1)<-c(1:(k+1))
-write.csv(wide_data_1,"~/Desktop/BCMC_result/hrs/wide_data.csv")
+write.csv(wide_data_1,paste0("~/Desktop/BCMC_result/hrs/wide_data_",R,".csv"))
 
 #3. Extracted  survival time data
 x_list <- list()
-  x_list[[1]] <-dat_hrs[,c(46:56)]
+x_list[[1]] <- t(apply(dat_hrs[, 46:56],1,function(x) c(x[1], rep(x[-1], each = 4))))
 n # The number of samples
 q<-1
 C1<-data_sur_extract(wide_data_1,x_list,q)
-# m=1 表示pfs-pd
+
 C_2<-C1[which((C1$m==1)|(C1$m==5)),]
-C_2[which(m==5),3]<-2
-write.csv(C_2,"~/Desktop/BCMC_result/hrs/data_sur.csv")
+C_2[which(C_2$m==5),3]<-2
+write.csv(C_2,paste0("~/Desktop/BCMC_result/hrs/data_sur_",R,".csv"))
+}
 end.rcode-->
