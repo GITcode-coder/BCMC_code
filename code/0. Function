@@ -454,9 +454,6 @@ lapply(seq_len(M), function(m) {
 #6. beta estimation of BCMC
    beta_of_bcmc<-function(data_sur,M,K,s0,lamstar){
     library(job)
-    library(rjags)
-    library(coda)
-    library(R2jags)
     library(lattice)
     library(MCMCvis)
     library(foreach)
@@ -517,7 +514,7 @@ N[i,kk]~ dpois(exp(beta1[kk]*(sur_X[i]))*H[i,kk]*lam1[kk])
 w<-0.01
 for(kk in 1:K){ # prior on baseline hazard bits
 f1[kk] <- w*(a[kk+1]-a[kk])
-e1[kk] <- lamstar*f1[kk]
+e1[kk] <- lamstar*f[kk]
 lam1[kk]~dgamma(e1[kk],f1[kk])
 }
 
@@ -540,7 +537,7 @@ sigma_beta_sq <- pow(sigma_beta, 2)
 }")
                             
 #(2)load the data,specify initial values and compile the mcmc code
-data_list <- list(row=row,sur_X=sur_X,N=N,H=H,K=K,a=a,s0=s0,lamstar=lamstar)
+data_list <- list(row=row,sur_X=sur_X,N=N,H=H,K=K,a=a,lamstar=lamstar)
 sigma_beta_init <- 1.0  
 lam1_init <- rep(0.1, K)
 beta_init[1] <- rnorm(1, 0, 0.1) 
