@@ -221,3 +221,95 @@ writeLines(
   "~/Desktop/BCMC_result/sessionInfo.txt"
 )
 end.rcode-->
+
+<p>Table_2<p>
+<!--begin.rcode
+# Table 2: BCMC peak/trough timing accuracy under the U-shaped scenario
+# Uses the same R independent simulation replicates as Table 1.
+
+stopifnot(
+  M == 4L,
+  K == 260L,
+  ncol(extremum_time_sim) == M,
+  all(extremum_time_sim >= 1 & extremum_time_sim <= K)
+)
+
+transition <- c("PFS-PD","PD-PFS","PFS-Death","PD-Death")
+
+extremum_type <- c("Trough","Peak","Trough","Trough")
+
+# Prespecified true extremum time under the U-shaped scenario
+true_time <- rep(130, M)
+
+# Verify that week 130 attains the prespecified true extremum
+# on the same evaluation grid used in Table 1.
+obser <- round((1:K) / K * K0)
+
+for (m in 1:M) {
+  true_curve <- exp(beta_true[m, obser])
+
+  stopifnot(all(is.finite(true_curve)))
+
+  true_extremum <- if (m == 2L) {
+    max(true_curve)
+  } else {
+    min(true_curve)
+  }
+
+  if (!isTRUE(all.equal(
+    as.numeric(true_curve[true_time[m]]),
+    as.numeric(true_extremum),
+    tolerance = 1e-8
+  ))) {
+    stop(
+      "Week 130 is not the prespecified true extremum for ",
+      transition[m],
+      ". Check that the current scenario is U-shaped."
+    )
+  }
+}
+
+mean_time <- numeric(M)
+time_lwr <- numeric(M)
+time_upr <- numeric(M)
+timing_mae <- numeric(M)
+
+for (m in 1:M) {
+  estimated_time <- extremum_time_sim[, m]
+  estimated_time <- estimated_time[is.finite(estimated_time)]
+
+  mean_time[m] <- mean(estimated_time)
+
+  time_quantile <- quantile(
+    estimated_time,
+    probs = c(0.025, 0.975),
+    names = FALSE,
+    type = 7
+  )
+
+  time_lwr[m] <- time_quantile[1]
+  time_upr[m] <- time_quantile[2]
+
+  timing_mae[m] <- mean(
+    abs(estimated_time - true_time[m])
+  )
+}
+
+table_2 <- data.frame(
+  Transition = transition,
+  `Extremum type` = extremum_type,
+  `True time (weeks)` = true_time,
+  `Mean estimated time, weeks (empirical 2.5th–97.5th percentile)` =
+    sprintf(
+      "%.2f (%.2f, %.2f)",
+      mean_time,
+      time_lwr,
+      time_upr
+    ),
+  `Timing MAE (weeks)` = round(timing_mae, 2),
+  check.names = FALSE
+)
+
+write.csv(table_2,paste0("~/Desktop/BCMC_result/norm/table_2.csv"))
+end.rcode-->
+
