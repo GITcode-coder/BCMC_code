@@ -1,9 +1,11 @@
-<p>6.1. table 1 <p>
+<p>6. table 1 <p>
 <!--begin.rcode
 # Table 1: performance measures and 95% CIs are based on 500 independent simulation replicates
 library(Metrics)
 R <- 500
 
+transition_names <- c("PFS-PD","PD-PFS","PFS-Death","PD-Death")
+scenario_name <- sta[stasi]
 run_one_sim <- function(seed){
   set.seed(seed)
   x_list <- list()
@@ -20,7 +22,7 @@ run_one_sim <- function(seed){
   n_sim <- n_patients
   discrete_chains <- list()
   for (i in 1:n_sim) {
-    start_state <- sample(c("PFS", "PD"), 1, prob = c(2/3, 1/3))
+    start_state <- sample(c("PFS", "PD"), 1, prob = c(0.75, 0.25))
     cont_traj <- sim_one_patient(i, params, tmax, start_state)
     states <- sur_traj(cont_traj, tp)
     discrete_chains[[i]] <- data.frame(PatientID = i, Time = tp, State = states)
@@ -43,33 +45,38 @@ run_one_sim <- function(seed){
   HR_TV <- HR_TV[,-13]
   HR_rcs <- beta_of_HR_rcs(data_sur,M,K)
   HR_rcs <- HR_rcs[,-13]
-  beta_post <- beta_of_bcmc(data_sur,M,K,s0,lamstar)
-  bcmc <- beta_post[1:K,c(1:3,6:8,11:13,16:18)]
-  n0 <- 200
-  bcmc_wei <- beta_fit_wei(bcmc,M,K,n0)
-  bcmc_lin <- beta_fit_lin(bcmc,M,K,n0)
-  bcmc_splin_1 <- beta_fit_splin(bcmc,M,K,n0,3)
-  bcmc_splin_2 <- beta_fit_splin(bcmc,M,K,n0,4)
-  bcmc_splin_3 <- beta_fit_splin(bcmc,M,K,n0,5)
-  bcmc_splin_4 <- beta_fit_splin(bcmc,M,K,n0,6)
+  bcmc_result<- beta_of_bcmc(data_sur,M,K,s0,lamstar)
+  beta_post <- bcmc_result$beta_post_all
+  bcmc_posterior <- bcmc_result$bcmc_posterior
+  bcmc<-beta_post[1:K,c(1:3,6:8,11:13,16:18)]
+
+bcmc_wei<-beta_fit_wei(bcmc,bcmc_posterior,M,K)
+bcmc_lin<-beta_fit_lin(bcmc,bcmc_posterior,M,K)
+bcmc_splin_1<-beta_fit_splin(bcmc,bcmc_posterior,M,K,3)
+bcmc_splin_2<-beta_fit_splin(bcmc,bcmc_posterior,M,K,4)
+bcmc_splin_3<-beta_fit_splin(bcmc,bcmc_posterior,M,K,5)
+bcmc_splin_4<-beta_fit_splin(bcmc,bcmc_posterior,M,K,6)
   bcmc_fit_all <- list()
-  aic_all_0 <- 0
+  zbic_all_0 <- 0
+  selected_model <- integer(M)
   for(m in 1:M){
-    col <- (m-1)*3+1
-    y0 <- bcmc[,col]
-    bcmc_all <- list(bcmc_wei[[m]],bcmc_lin[[m]],bcmc_splin_1[[m]],bcmc_splin_2[[m]],bcmc_splin_3[[m]],bcmc_splin_4[[m]])
-    aic_all <- c(0)
+  col<-(m-1)*3+1
+  y0<-bcmc[,col]
+  bcmc_all<-list(bcmc_wei[[m]],bcmc_lin[[m]],bcmc_splin_1[[m]],bcmc_splin_2[[m]],bcmc_splin_3[[m]],bcmc_splin_4[[m]])
+  zbic_all <- c(0)
+    n_parm <- c(2,2,3,4,5,6)
     for(mod in 1:6){
-      n_parm <- c(2,2,4,5,6,7)
       y1 <- as.vector(bcmc_all[[mod]][,1])
-      aic0 <- zbic(y0,log(y1),n_parm[mod])
-      aic_all <- c(aic_all,aic0)
+      zbic0 <- zbic(y0,log(y1),n_parm[mod],tau=log(1.25))
+      zbic_all <- c(zbic_all,zbic0)
     }
-    aic_all_0 <- rbind(aic_all_0,c(aic_all[-1],which.min(aic_all[-1])))
-    best_mod <- which.min(aic_all[-1])
+    zbic_all_0 <- rbind(zbic_all_0,c(zbic_all[-1],which.min(zbic_all[-1])))
+    best_mod <- which.min(zbic_all[-1])
+    selected_model[m] <- best_mod
     bcmc_fit_all[[m]] <- bcmc_all[[best_mod]]
-  }
+}
   data_all <- list()
+  transition_names <- c("PFS-PD","PD-PFS","PFS-Death","PD-Death")
   for(m in 1:M){
     y_cox <- cbind(rep(as.numeric(HR_cox[m,1]),K),rep(as.numeric(HR_cox[m,2]),K),rep(as.numeric(HR_cox[m,3]),K))
     colnames(y_cox) <- c("cox","cox_lwr","cox_upr")
@@ -81,8 +88,11 @@ run_one_sim <- function(seed){
     y_true <- exp(beta_true[m,round(c(1:K)/K*K0)])
     x <- data.frame(x = 1:K)
     data_all[[m]] <- cbind(x,y_true,bcmc_fit_all[[m]],y_cox,y_tv,y_rcs)
+    data_all[[m]]$selected_model <- selected_model[m]
   }
-  data_all
+  names(data_all) <- transition_names
+return(list(data_all = data_all,
+            beta_post = beta_post))
 }
 
 bias_sim <- array(NA, dim = c(R, M, 4))
@@ -91,9 +101,46 @@ mse_sim <- array(NA, dim = c(R, M, 4))
 smape_sim <- array(NA, dim = c(R, M, 4))
 ci_cov_sim <- array(NA, dim = c(R, M, 4))
 ci_wide_sim <- array(NA, dim = c(R, M, 4))
+extremum_time_sim <- matrix(NA_real_, nrow = R, ncol = M)
+model_selection_sim <- matrix(NA_integer_,nrow = R,ncol = M,dimnames = list(NULL,
+c("PFS-PD", "PD-PFS", "PFS-Death", "PD-Death")))
+method_names <- c("Fre-Cox","TVC-Cox","TVC-B","BCMC")
+output_dir <- path.expand("~/Desktop/BCMC_result")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+curve_metrics <- function(true, est, lwr, upr) {
+  ok <- is.finite(true) & is.finite(est) & is.finite(lwr) & is.finite(upr)
+  if (!any(ok)) stop("No finite time points available for performance calculation")
+  true <- true[ok]; est <- est[ok]; lwr <- lwr[ok]; upr <- upr[ok]
+  err <- true - est
+  out <- c(
+    bias = mean(err),
+    mae = mean(abs(err)),
+    mse = mean(err^2),
+    smape = mean(2 * abs(err) / pmax(abs(true) + abs(est), .Machine$double.eps)) * 100,
+    coverage = mean(lwr <= true & true <= upr),
+    width = mean(upr - lwr)
+  )
+  stopifnot(abs(out["bias"]) <= out["mae"] + 1e-12)
+  out
+}
+
 
 for(r in 1:R){
-  data_all_r <- run_one_sim(r)
+  set.seed(r)
+  data_all_sim<- run_one_sim(r)
+  data_all_r <- data_all_sim$data_all
+  data_all_r_csv <- do.call(rbind,lapply(1:M, function(m) {
+  out <- data_all_r[[m]]
+  out$transition_path <- names(data_all_r)[m]
+  out
+})
+)
+  rownames(data_all_r_csv) <- NULL
+  write.csv(data_all_r_csv,paste0(output_dir,"/data_all_",r,".csv"),row.names = FALSE)
+  beta_post_all_r<-data_all_sim$beta_post
+  write.csv(beta_post_all_r,paste0(output_dir,"/beta_post_all_",r,".csv"),row.names = FALSE)
+  
   for(m in 1:M){
     dat <- data_all_r[[m]][,c(2,3,6,9,12)]
     colnames(dat) <- c("true","bcmc","cox","tv","rcs")
@@ -102,16 +149,25 @@ for(r in 1:R){
     lwr_list <- list(ci_95[,3], ci_95[,5], ci_95[,7], ci_95[,1])
     upr_list <- list(ci_95[,4], ci_95[,6], ci_95[,8], ci_95[,2])
     for(p_method in 1:4){
-      est <- est_list[[p_method]]
-      true <- dat$true
-      bias_sim[r,m,p_method] <- mean(true-est,na.rm=TRUE)
-      mae_sim[r,m,p_method] <- mean(abs(true-est),na.rm=TRUE)
-      mse_sim[r,m,p_method] <- mean((true-est)^2,na.rm=TRUE)
-      smape_sim[r,m,p_method] <- mean(smape(true,est)*100,na.rm=TRUE)
-      ci_cov_sim[r,m,p_method] <- mean(lwr_list[[p_method]] <= true & true <= upr_list[[p_method]],na.rm=TRUE)
-      ci_wide_sim[r,m,p_method] <- mean(abs(upr_list[[p_method]]-lwr_list[[p_method]]),na.rm=TRUE)
+      metric <- curve_metrics(
+        true = dat$true,
+        est = est_list[[p_method]],
+        lwr = lwr_list[[p_method]],
+        upr = upr_list[[p_method]]
+      )
+     bias_sim[r, m, p_method] <- metric["bias"]
+     mae_sim[r, m, p_method] <- metric["mae"]
+     mse_sim[r, m, p_method] <- metric["mse"]
+     smape_sim[r, m, p_method] <- metric["smape"]
+     ci_cov_sim[r, m, p_method] <- metric["coverage"]
+     ci_wide_sim[r, m, p_method] <- metric["width"]
     }
-  }
+    extremum_time_sim[r, m] <- if (m == 2) {which.max(dat$bcmc)
+    } else {which.min(dat$bcmc)}
+
+    # Selected smoothing model stored in the final column.
+    model_selection_sim[r, m] <-data_all_r[[m]]$selected_model[1]}
+  message("Completed simulation replicate ", r, " of ", R)
 }
 
 bias <- 0
@@ -126,117 +182,42 @@ ci_wide <- 0
 for(m in 1:M){
   for(p_method in 1:4){
     bias <- c(bias,mean(bias_sim[,m,p_method],na.rm=TRUE))
-    bias_5 <- c(bias_5,t_test_ci_bias(bias_sim[,m,p_method],rep(0,R)))
+    bias_5 <- c(bias_5,boot_ci(bias_sim[,m,p_method]))
     mae <- c(mae,mean(mae_sim[,m,p_method],na.rm=TRUE))
     mse <- c(mse,mean(mse_sim[,m,p_method],na.rm=TRUE))
     smape <- c(smape,paste0(round(mean(smape_sim[,m,p_method],na.rm=TRUE),2),"%"))
-    mae_5 <- c(mae_5,t_test_ci_mae(mae_sim[,m,p_method],rep(0,R)))
-    mse_5 <- c(mse_5,t_test_ci_mse(mse_sim[,m,p_method],rep(0,R)))
+    mae_5 <- c(mae_5,boot_ci(mae_sim[,m,p_method]))
+    mse_5 <- c(mse_5,boot_ci(mse_sim[,m,p_method]))
     ci_cov <- c(ci_cov,paste0(round(mean(ci_cov_sim[,m,p_method],na.rm=TRUE)*100,2),"%"))
     ci_wide <- c(ci_wide,round(mean(ci_wide_sim[,m,p_method],na.rm=TRUE),2))
   }
 }
 rmse <- sqrt(mse)
 out <- cbind(bias,bias_5,mae,mae_5,mse,mse_5,rmse,smape,ci_cov,ci_wide)[-1,]
-write.csv(out,paste0("~/Desktop/BCMC_result/",sta[stasi],"/table_1_z.csv"))
-end.rcode-->
+stopifnot(all(abs(as.numeric(out[,"bias"])) <= as.numeric(out[,"mae"]) + 1e-12))
+write.csv(out,"~/Desktop/BCMC_result/table_1_z.csv")
 
 
-<p>6.2. Table_2<p>
-<!--begin.rcode
-K<-260
-dat_norm<- read_csv("~/Desktop/BCMC_result/norm/data_all.csv")[,-1]
-bcmc_norm<-rbind(dat_norm$bcmc,dat_norm$bcmc.1,dat_norm$bcmc.2,dat_norm$bcmc.3)
-a<-which.min(dat_norm$bcmc)
-b<-which.max(dat_norm$bcmc.1)
-c<-which.min(dat_norm$bcmc.2)
-d<-which.min(dat_norm$bcmc.3)
+model_names <- c("Weibull","Linear","Spline df=3","Spline df=4","Spline df=5","Spline df=6")
+selection_table <- do.call(rbind,lapply(1:M, function(m) {
+valid_selection <- model_selection_sim[, m]
+valid_selection <- valid_selection[!is.na(valid_selection)]
+counts <- table(factor(valid_selection,levels = 1:6))
+data.frame(
+  Scenario = scenario_name,
+  Transition = transition_names[m],
+  Model = model_names,
+  Count = as.integer(counts),
+  Selection_percentage =round(100 * as.integer(counts) / length(valid_selection), 2),
+  Successful_replicates = length(valid_selection)
+    )
+  })
+)
+print(selection_table)
+write.csv(selection_table,"~/Desktop/BCMC_result/selection_table.csv")
 
-top<-c(K/2,119,120,121,138)
-top
-
-wide_data<-read_csv("~/Desktop/BCMC_reslut/norm/wide_data_1.csv")[,-1]
-h<-c(1:K)
-os_norm<-apply(wide_data,1,function(x){h[which(x==3)[1]]})
-summary(os_norm)
-for(m in 1:4){
-beta<- matrix(0, nrow=M, ncol=K)
-  for(t in 1:K){
-    x<-t
-  si<-60
-  mu<-130
-  beta[1,t]<-(-1)*40*si^(-1)*exp((-(x-130)^2)/(2*si^2))#
-  beta[2,t]<-45*si^(-1)*exp((-(x-130)^2)/(2*si^2))
-  beta[3,t]<-(-1)*40*si^(-1)*exp((-(x-130)^2)/(2*si^2))#
-  beta[4,t]<-(-1)*40*si^(-1)*exp((-(x-130)^2)/(2*si^2))#
-  }
-beta[m,]<-bcmc_norm[m,]
-HR<-  matrix(0, nrow=M, ncol=K)
-HR<-exp(beta)
-plot(HR[m,])
-n_patients <- 1000 # The number of samples
-K <- 260
-q <- 1
-set.seed(123)
-
-x_list <- list()
-x_list[[1]] <- matrix(1, nrow = n_patients, ncol = K)
-x_list[[1]][1:(n_patients/2),] <- 0  # 前一半为对照组(X1=0)，后一半为治疗组(X1=1)
-names(x_list) <- c("Covariate1")
-
-beta_list <- list()
-beta_list[[1]] <- beta
-names(beta_list) <- c("Covariate1")
-tp <- 0:K
-tmax <- K
-n_sim <- n_patients  
-set.seed(123)
-discrete_chains <- list()
-
-pb <- txtProgressBar(min = 0, max = n_sim, style = 3)
-for (i in 1:n_sim) {
-  start_state <- sample(c("PFS", "PD"), 1, prob = c(2/3, 1/3))
-  cont_traj <- sim_one_patient(i, params, tmax,start_state)
-  states <- sur_traj(cont_traj, tp)
-  discrete_chains[[i]] <- data.frame(
-    PatientID = i,
-    Time = tp,
-    State = states
-  )
-  setTxtProgressBar(pb, i)
-}
-close(pb)
-
-library(tidyr)
-wide_data <- do.call(rbind, lapply(discrete_chains, function(df) {
-  df$State_Num <- as.numeric(factor(df$State,
-                                   levels = c("PFS", "PD", "Death"),
-                                   labels = c(1, 2, 3)))
-  df_wide <- as.data.frame(t(df$State_Num))
-  names(df_wide) <- paste0("t_", tp)
-  df_wide
-}))
-wide_data<-as.data.frame(wide_data)
-
-h<-c(1:K)
-os<-apply(wide_data,1,function(x){h[which(x==3)[1]]})
-print(summary(os))
-os_norm<-cbind(os_norm,os)
-}
-
-summary(os_norm)
-OS_NORM_2<-c(0)
-B <- 500
-set.seed(123)
-for(c in 1:5){
- mean<-mean(os_norm[,c],na.rm =TRUE)
- boot_mean <- replicate(B, mean(sample(os_norm[,c], size = nrow(os_norm), replace = TRUE),na.rm = TRUE))
- mean_low<-quantile(boot_mean,0.025,na.rm =TRUE)
- mean_up<-quantile(boot_mean,0.975,na.rm =TRUE)
- os<-paste0(round(mean/4,2),"(",round(mean_low/4,2),"~",round(mean_up/4,2),")")
- OS_NORM_2<-cbind(OS_NORM_2,c(mean,mean_low,mean_up,os))
-}
-colnames(OS_NORM_2)
-OS_NORM_2<-rbind(top,OS_NORM_2[,-1])
-write.csv(OS_NORM_2,"~/Desktop/BCMC_result/norm/table2_norm_z.csv")
+writeLines(
+  capture.output(sessionInfo()),
+  "~/Desktop/BCMC_result/sessionInfo.txt"
+)
 end.rcode-->
