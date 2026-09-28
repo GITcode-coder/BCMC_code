@@ -1,6 +1,6 @@
 <!--begin.rcode
 #1. sampling time from weibull (considering covariate effects)
-  sample_tran_time <- function(kappa, lambda, beta_row_index, patient_id, entry_time, tmax, q,interval=1) {
+   sample_tran_time <- function(kappa, lambda,x_list,beta_list, beta_row_index, patient_id, entry_time, tmax, q,interval=1) {
     # Generate uniform random number
     U <- runif(1)
     if (U <= 0) return(Inf)
@@ -26,10 +26,12 @@
           beta_j <- beta_list[[j]][beta_row_index, time_idx]
           eta <- eta + x_j * beta_j
         }
-      
+        
+        # 离散时间的风险贡献
         cumulative_hazard <- cumulative_hazard + h0 * exp(eta)
       }
       
+      # 检查是否发生事件
       if (exp(-cumulative_hazard) < U) {
         return(t)
       }
@@ -39,13 +41,13 @@
   }
   
 #2.Simulate the complete trajectory of a single patient
-  sim_one_patient <- function(patient_id, params, tmax = K, start_state) {
+  sim_one_patient <- function(patient_id, params, tmax = K, start_state,x_list,beta_list) {
     current_state <- start_state
     entry_time <- 0
     traj <- data.frame(time = entry_time, state = current_state, event = "Enter")
     
     while (current_state != "Death" & entry_time < tmax) {
-      
+      # 找出从当前状态出发的可能转移
       possible_trans <- Filter(function(x) x[1] == current_state, params)
       if (length(possible_trans) == 0) break
       
@@ -57,10 +59,11 @@
         lambda <- as.numeric(trans[4])
         beta_row_index <- as.numeric(trans[5]) # m=1,2,3,4
         
-        t_sample <- sample_tran_time(kappa, lambda,  beta_row_index, patient_id, entry_time, tmax, q,interval=1)
+        t_sample <- sample_tran_time(kappa, lambda, x_list,beta_list,  beta_row_index, patient_id, entry_time, tmax, q,interval=1)
         times[j] <- t_sample
       }
       
+      # 找到最早发生的事件
       next_time <- min(times)
       if (next_time >= tmax) break
       
@@ -87,7 +90,6 @@
     
     return(traj)
   }
-  
 #3. Convert continuous trajectories into discrete-time state chains
   sur_traj <- function(traj, tp) {
     states <- rep(NA, length(tp))
