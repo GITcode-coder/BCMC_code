@@ -152,7 +152,7 @@ write.csv(wide_data_1,paste0("~/Desktop/BCMC_result/hrs/wide_data_",R,".csv"))
 
 #3. Extracted  survival time data
 x_list <- list()
-x_list[[1]] <- t(apply(dat_hrs[, 46:56],1,function(x) c(x[1], rep(x[-1], each = 4))))
+x_list[[1]] <- t(apply(dat_hrs[, 46],1,function(x) rep(x, each = 41)))
 n # The number of samples
 q<-1
 C1<-data_sur_extract(wide_data_1,x_list,q)
