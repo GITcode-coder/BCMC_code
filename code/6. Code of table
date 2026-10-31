@@ -1,315 +1,761 @@
-<p>6. table 1 <p>
 <!--begin.rcode
-# Table 1: performance measures and 95% CIs are based on 500 independent simulation replicates
+# Table 1: primary analysis and one-factor-at-a-time sensitivity analyses
+# Requires the simulation, model-fitting, smoothing, and ZBIC functions
+# defined in the preceding code sections.
+
 library(Metrics)
+
 R <- 500
 
-transition_names <- c("PFS-PD","PD-PFS","PFS-Death","PD-Death")
-scenario_name <- sta[stasi]
-run_one_sim <- function(seed){
-  set.seed(seed)
-  x_list <- list()
-  x_list[[1]] <- matrix(1, nrow = n_patients, ncol = K0)
-  x_list[[1]][1:(n_patients/2),] <- 0
-  names(x_list) <- c("Covariate1")
-  beta_list <- list()
-  beta_list[[1]] <- beta_true
-  names(beta_list) <- c("Covariate1")
-  assign("x_list", x_list, envir = .GlobalEnv)
-  assign("beta_list", beta_list, envir = .GlobalEnv)
-  tp <- 0:K0
-  tmax <- K0
-  n_sim <- n_patients
-  discrete_chains <- list()
-  for (i in 1:n_sim) {
-    start_state <- sample(c("PFS", "PD"), 1, prob = c(0.75, 0.25))
-    cont_traj <- sim_one_patient(i, params, tmax, start_state)
-    states <- sur_traj(cont_traj, tp)
-    discrete_chains[[i]] <- data.frame(PatientID = i, Time = tp, State = states)
-  }
-  wide_data <- do.call(rbind, lapply(discrete_chains, function(df) {
-    df$State_Num <- as.numeric(factor(df$State,
-                                      levels = c("PFS", "PD", "Death"),
-                                      labels = c(1, 2, 3)))
-    df_wide <- as.data.frame(t(df$State_Num))
-    names(df_wide) <- paste0("t_", tp)
-    df_wide
-  }))
-  wide_data <- as.data.frame(wide_data)
-  obser <- round(c(1:K)/K*K0)
-  wide_data_1 <- wide_data[,c(1,obser+1)]
-  C1 <- data_sur_extract(wide_data_1, x_list, q)
-  data_sur <- C1
-  HR_cox <- beta_of_HR_cox(data_sur,M)
-  HR_TV <- beta_of_HR_TV(data_sur,M,K)
-  HR_TV <- HR_TV[,-13]
-  HR_rcs <- beta_of_HR_rcs(data_sur,M,K)
-  HR_rcs <- HR_rcs[,-13]
-  bcmc_result<- beta_of_bcmc(data_sur,M,K,s0,lamstar)
-  beta_post <- bcmc_result$beta_post_all
-  bcmc_posterior <- bcmc_result$bcmc_posterior
-  bcmc<-beta_post[1:K,c(1:3,6:8,11:13,16:18)]
+transition_names <- c("PFS-PD", "PD-PFS", "PFS-Death", "PD-Death")
+method_names <- c("Fre-Cox", "TVC-Cox", "TVC-B", "BCMC", "Crowther")
 
-bcmc_wei<-beta_fit_wei(bcmc,bcmc_posterior,M,K)
-bcmc_lin<-beta_fit_lin(bcmc,bcmc_posterior,M,K)
-bcmc_splin_1<-beta_fit_splin(bcmc,bcmc_posterior,M,K,3)
-bcmc_splin_2<-beta_fit_splin(bcmc,bcmc_posterior,M,K,4)
-bcmc_splin_3<-beta_fit_splin(bcmc,bcmc_posterior,M,K,5)
-bcmc_splin_4<-beta_fit_splin(bcmc,bcmc_posterior,M,K,6)
-  bcmc_fit_all <- list()
-  zbic_all_0 <- 0
-  selected_model <- integer(M)
-  for(m in 1:M){
-  col<-(m-1)*3+1
-  y0<-bcmc[,col]
-  bcmc_all<-list(bcmc_wei[[m]],bcmc_lin[[m]],bcmc_splin_1[[m]],bcmc_splin_2[[m]],bcmc_splin_3[[m]],bcmc_splin_4[[m]])
-  zbic_all <- c(0)
-    n_parm <- c(2,2,3,4,5,6)
-    for(mod in 1:6){
-      y1 <- as.vector(bcmc_all[[mod]][,1])
-      zbic0 <- zbic(y0,log(y1),n_parm[mod],tau=log(1.25))
-      zbic_all <- c(zbic_all,zbic0)
-    }
-    zbic_all_0 <- rbind(zbic_all_0,c(zbic_all[-1],which.min(zbic_all[-1])))
-    best_mod <- which.min(zbic_all[-1])
-    selected_model[m] <- best_mod
-    bcmc_fit_all[[m]] <- bcmc_all[[best_mod]]
-}
-  data_all <- list()
-  transition_names <- c("PFS-PD","PD-PFS","PFS-Death","PD-Death")
-  for(m in 1:M){
-    y_cox <- cbind(rep(as.numeric(HR_cox[m,1]),K),rep(as.numeric(HR_cox[m,2]),K),rep(as.numeric(HR_cox[m,3]),K))
-    colnames(y_cox) <- c("cox","cox_lwr","cox_upr")
-    col <- (m-1)*3+1
-    y_tv <- cbind(HR_TV[,col],HR_TV[,col+1],HR_TV[,col+2])
-    colnames(y_tv) <- c("tv","tv_lwr","tv_upr")
-    y_rcs <- cbind(HR_rcs[,col],HR_rcs[,col+1],HR_rcs[,col+2])
-    colnames(y_rcs) <- c("rcs","rcs_lwr","rcs_upr")
-    y_true <- exp(beta_true[m,round(c(1:K)/K*K0)])
-    x <- data.frame(x = 1:K)
-    data_all[[m]] <- cbind(x,y_true,bcmc_fit_all[[m]],y_cox,y_tv,y_rcs)
-    data_all[[m]]$selected_model <- selected_model[m]
-  }
-  names(data_all) <- transition_names
-return(list(data_all = data_all,
-            beta_post = beta_post))
-}
+model_names_s13 <- c(
+  "No model fitting",
+  "Linear",
+  "Weibull",
+  "Spline df=3",
+  "Spline df=4",
+  "Spline df=5",
+  "Spline df=6"
+)
 
-bias_sim <- array(NA, dim = c(R, M, 4))
-mae_sim <- array(NA, dim = c(R, M, 4))
-mse_sim <- array(NA, dim = c(R, M, 4))
-smape_sim <- array(NA, dim = c(R, M, 4))
-ci_cov_sim <- array(NA, dim = c(R, M, 4))
-ci_wide_sim <- array(NA, dim = c(R, M, 4))
-extremum_time_sim <- matrix(NA_real_, nrow = R, ncol = M)
-model_selection_sim <- matrix(NA_integer_,nrow = R,ncol = M,dimnames = list(NULL,
-c("PFS-PD", "PD-PFS", "PFS-Death", "PD-Death")))
-method_names <- c("Fre-Cox","TVC-Cox","TVC-B","BCMC")
 output_dir <- path.expand("~/Desktop/BCMC_result")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
+
+# Performance metrics for one fitted curve.
 curve_metrics <- function(true, est, lwr, upr) {
-  ok <- is.finite(true) & is.finite(est) & is.finite(lwr) & is.finite(upr)
-  if (!any(ok)) stop("No finite time points available for performance calculation")
-  true <- true[ok]; est <- est[ok]; lwr <- lwr[ok]; upr <- upr[ok]
+  ok <- is.finite(true) &
+    is.finite(est) &
+    is.finite(lwr) &
+    is.finite(upr)
+  
+  if (!any(ok)) {
+    stop("No finite time points available for performance calculation.")
+  }
+  
+  true <- true[ok]
+  est <- est[ok]
+  lwr <- lwr[ok]
+  upr <- upr[ok]
+  
   err <- true - est
+  
   out <- c(
     bias = mean(err),
     mae = mean(abs(err)),
     mse = mean(err^2),
-    smape = mean(2 * abs(err) / pmax(abs(true) + abs(est), .Machine$double.eps)) * 100,
+    smape = mean(
+      2 * abs(err) /
+        pmax(abs(true) + abs(est), .Machine$double.eps)
+    ) * 100,
     coverage = mean(lwr <= true & true <= upr),
     width = mean(upr - lwr)
   )
+  
   stopifnot(abs(out["bias"]) <= out["mae"] + 1e-12)
   out
 }
 
 
-for(r in 1:R){
-  set.seed(r)
-  data_all_sim<- run_one_sim(r)
-  data_all_r <- data_all_sim$data_all
-  data_all_r_csv <- do.call(rbind,lapply(1:M, function(m) {
-  out <- data_all_r[[m]]
-  out$transition_path <- names(data_all_r)[m]
-  out
-})
-)
-  rownames(data_all_r_csv) <- NULL
-  write.csv(data_all_r_csv,paste0(output_dir,"/data_all_",r,".csv"),row.names = FALSE)
-  beta_post_all_r<-data_all_sim$beta_post
-  write.csv(beta_post_all_r,paste0(output_dir,"/beta_post_all_",r,".csv"),row.names = FALSE)
+# Generate one weekly cohort per replicate.
+# The patient-level weekly trajectories are held in wide_data_list.
+generate_weekly_cohort <- function(seed) {
+  set.seed(seed)
   
-  for(m in 1:M){
-    dat <- data_all_r[[m]][,c(2,3,6,9,12)]
-    colnames(dat) <- c("true","bcmc","cox","tv","rcs")
-    ci_95 <- data_all_r[[m]][,c(4,5,7,8,10,11,13,14)]
-    est_list <- list(dat$cox, dat$tv, dat$rcs, dat$bcmc)
-    lwr_list <- list(ci_95[,3], ci_95[,5], ci_95[,7], ci_95[,1])
-    upr_list <- list(ci_95[,4], ci_95[,6], ci_95[,8], ci_95[,2])
-    for(p_method in 1:4){
-      metric <- curve_metrics(
-        true = dat$true,
-        est = est_list[[p_method]],
-        lwr = lwr_list[[p_method]],
-        upr = upr_list[[p_method]]
+  x_list <- list()
+  x_list[[1]] <- matrix(1, nrow = n_patients, ncol = K0)
+  x_list[[1]][1:(n_patients / 2), ] <- 0
+  names(x_list) <- "Covariate1"
+  
+  beta_list <- list()
+  beta_list[[1]] <- beta_true
+  names(beta_list) <- "Covariate1"
+  
+  tp <- 0:K0
+  tmax <- K0
+  n_sim <- n_patients
+  
+  wide_data_list <- vector("list", n_sim)
+  
+  for (i in seq_len(n_sim)) {
+    start_state <- sample(
+      c("PFS", "PD"),
+      1,
+      prob = c(0.75, 0.25)
+    )
+    
+    cont_traj <- sim_one_patient(
+      i,
+      params,
+      tmax,
+      start_state,
+      x_list,
+      beta_list
+    )
+    
+    states <- sur_traj(cont_traj, tp)
+    
+    wide_data_list[[i]] <- as.numeric(
+      factor(
+        states,
+        levels = c("PFS", "PD", "Death"),
+        labels = c("1", "2", "3")
       )
-     bias_sim[r, m, p_method] <- metric["bias"]
-     mae_sim[r, m, p_method] <- metric["mae"]
-     mse_sim[r, m, p_method] <- metric["mse"]
-     smape_sim[r, m, p_method] <- metric["smape"]
-     ci_cov_sim[r, m, p_method] <- metric["coverage"]
-     ci_wide_sim[r, m, p_method] <- metric["width"]
-    }
-    extremum_time_sim[r, m] <- if (m == 2) {which.max(dat$bcmc)
-    } else {which.min(dat$bcmc)}
+    )
+  }
+  
+  list(
+    wide_data_list = wide_data_list,
+    x_list = x_list
+  )
+}
 
-    # Selected smoothing model stored in the final column.
-    model_selection_sim[r, m] <-data_all_r[[m]]$selected_model[1]}
+
+# Fit all methods for one parameter setting using an existing weekly cohort.
+run_one_sim <- function(seed, wide_data, x_list, K, s0, lamstar) {
+  set.seed(seed)
+  
+  # Observation times across the fixed follow-up.
+  obs_time <- seq(0, K0, length.out = K + 1L)
+  
+  # For state extraction, use the state at the preceding weekly grid point.
+  obser <- as.integer(floor(obs_time))
+  obser <- pmax(0L, pmin(K0, obser))
+  
+  # Keep repeated indices, which occur for K > K0.
+  wide_data_1 <- wide_data[
+    ,
+    c(1L, obser[-1L] + 1L),
+    drop = FALSE
+  ]
+  names(wide_data_1) <- paste0("t_", 0:K)
+  
+  C1 <- data_sur_extract(wide_data_1, x_list, q)
+  
+  data_sur <- C1
+  data_sur$ID <- data_sur$ID
+  data_sur$y <- as.numeric(as.character(data_sur$y))
+  data_sur$m <- as.integer(as.character(data_sur$m))
+  data_sur$sigema <- as.integer(as.character(data_sur$sigema))
+  data_sur$X <- as.numeric(as.character(data_sur$X))
+  
+  HR_cox <- beta_of_HR_cox(data_sur, M)
+  
+  HR_TV <- beta_of_HR_TV(data_sur, M, K)
+  HR_TV <- HR_TV[, -13]
+  
+  HR_rcs <- beta_of_HR_rcs(data_sur, M, K)
+  HR_rcs <- HR_rcs[, -13]
+  
+  bcmc_result <- beta_of_bcmc(data_sur, M, K, s0, lamstar)
+  beta_post <- bcmc_result$beta_post_all
+  bcmc_posterior <- bcmc_result$bcmc_posterior
+  bcmc <- beta_post[1:K, c(1:3, 6:8, 11:13, 16:18)]
+  
+  crowther_result <- beta_of_Crowther(
+    data_sur = data_sur,
+    M = M,
+    K = K,
+    df_baseline = 3,
+    df_tvc = 2,
+    robust_se = TRUE
+  )
+  HR_Crowther <- crowther_result$HR[, -1]
+  
+  bcmc_wei <- beta_fit_wei(bcmc, bcmc_posterior, M, K)
+  bcmc_lin <- beta_fit_lin(bcmc, bcmc_posterior, M, K)
+  bcmc_splin_1 <- beta_fit_splin(bcmc, bcmc_posterior, M, K, 3)
+  bcmc_splin_2 <- beta_fit_splin(bcmc, bcmc_posterior, M, K, 4)
+  bcmc_splin_3 <- beta_fit_splin(bcmc, bcmc_posterior, M, K, 5)
+  bcmc_splin_4 <- beta_fit_splin(bcmc, bcmc_posterior, M, K, 6)
+  
+  bcmc_fit_all <- list()
+  zbic_all_0 <- 0
+  selected_model <- integer(M)
+  
+  for (m in 1:M) {
+    col <- (m - 1) * 3 + 1
+    y0 <- bcmc[, col]
+    
+    bcmc_all <- list(
+      bcmc_wei[[m]],
+      bcmc_lin[[m]],
+      bcmc_splin_1[[m]],
+      bcmc_splin_2[[m]],
+      bcmc_splin_3[[m]],
+      bcmc_splin_4[[m]]
+    )
+    
+    zbic_all <- c(0)
+    n_parm <- c(2, 2, 3, 4, 5, 6)
+    
+    for (mod in 1:6) {
+      y1 <- as.vector(bcmc_all[[mod]][, 1])
+      zbic0 <- zbic(
+        y0,
+        log(y1),
+        n_parm[mod],
+        tau = log(1.25)
+      )
+      zbic_all <- c(zbic_all, zbic0)
+    }
+    
+    zbic_all_0 <- rbind(
+      zbic_all_0,
+      c(zbic_all[-1], which.min(zbic_all[-1]))
+    )
+    
+    best_mod <- which.min(zbic_all[-1])
+    selected_model[m] <- best_mod
+    bcmc_fit_all[[m]] <- bcmc_all[[best_mod]]
+  }
+  
+  data_all <- list()
+  data_all_model <- list()
+  
+  # The simulated beta is indexed by the ceiling of elapsed weekly time.
+  true_idx <- as.integer(ceiling(obs_time[-1L]))
+  true_idx <- pmax(1L, pmin(K0, true_idx))
+  
+  for (m in 1:M) {
+    y_cox <- cbind(
+      rep(as.numeric(HR_cox[m, 1]), K),
+      rep(as.numeric(HR_cox[m, 2]), K),
+      rep(as.numeric(HR_cox[m, 3]), K)
+    )
+    colnames(y_cox) <- c("cox", "cox_lwr", "cox_upr")
+    
+    col <- (m - 1) * 3 + 1
+    
+    y_tv <- cbind(
+      HR_TV[, col],
+      HR_TV[, col + 1],
+      HR_TV[, col + 2]
+    )
+    colnames(y_tv) <- c("tv", "tv_lwr", "tv_upr")
+    
+    y_rcs <- cbind(
+      HR_rcs[, col],
+      HR_rcs[, col + 1],
+      HR_rcs[, col + 2]
+    )
+    colnames(y_rcs) <- c("rcs", "rcs_lwr", "rcs_upr")
+    
+    y_Crowther <- cbind(
+      HR_Crowther[, col],
+      HR_Crowther[, col + 1],
+      HR_Crowther[, col + 2]
+    )
+    
+    y_true <- exp(beta_true[m, true_idx])
+    x <- data.frame(x = 1:K)
+    
+    data_all[[m]] <- cbind(
+      x,
+      y_true,
+      bcmc_fit_all[[m]],
+      y_cox,
+      y_tv,
+      y_rcs,
+      y_Crowther
+    )
+    data_all[[m]]$selected_model <- selected_model[m]
+    
+    bcmc_orig <- exp(bcmc[, c(col:(col + 2))])
+    
+    data_all_model[[m]] <- cbind(
+      x,
+      y_true,
+      bcmc_orig,
+      bcmc_lin[[m]],
+      bcmc_wei[[m]],
+      bcmc_splin_1[[m]],
+      bcmc_splin_2[[m]],
+      bcmc_splin_3[[m]],
+      bcmc_splin_4[[m]]
+    )
+  }
+  
+  names(data_all) <- transition_names
+  
+  list(
+    data_all = data_all,
+    data_all_model = data_all_model,
+    beta_post = beta_post
+  )
+}
+
+
+# Primary analysis and one-factor-at-a-time sensitivity settings.
+sensitivity_map <- data.frame(
+  Sensitivity = "Primary",
+  Value = "Primary",
+  K = as.numeric(K),
+  s0 = as.numeric(s0),
+  lamstar = as.numeric(lamstar),
+  stringsAsFactors = FALSE
+)
+
+for (value in K_sen) {
+  sensitivity_map <- rbind(
+    sensitivity_map,
+    data.frame(
+      Sensitivity = "K",
+      Value = as.character(value),
+      K = as.numeric(value),
+      s0 = as.numeric(s0),
+      lamstar = as.numeric(lamstar),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+for (value in s0_sen) {
+  sensitivity_map <- rbind(
+    sensitivity_map,
+    data.frame(
+      Sensitivity = "s0",
+      Value = as.character(value),
+      K = as.numeric(K),
+      s0 = as.numeric(value),
+      lamstar = as.numeric(lamstar),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+for (value in lamstar_sen) {
+  sensitivity_map <- rbind(
+    sensitivity_map,
+    data.frame(
+      Sensitivity = "lamstar",
+      Value = as.character(value),
+      K = as.numeric(K),
+      s0 = as.numeric(s0),
+      lamstar = as.numeric(value),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+
+# Identify unique parameter combinations so overlapping settings are fitted once.
+setting_key <- function(K, s0, lamstar) {
+  paste(
+    sprintf("%.12g", as.numeric(K)),
+    sprintf("%.12g", as.numeric(s0)),
+    sprintf("%.12g", as.numeric(lamstar)),
+    sep = "|"
+  )
+}
+
+sensitivity_map$key <- mapply(
+  setting_key,
+  sensitivity_map$K,
+  sensitivity_map$s0,
+  sensitivity_map$lamstar
+)
+
+unique_keys <- unique(sensitivity_map$key)
+sensitivity_map$setting_id <- match(
+  sensitivity_map$key,
+  unique_keys
+)
+
+unique_settings <- sensitivity_map[
+  match(unique_keys, sensitivity_map$key),
+  c("K", "s0", "lamstar", "setting_id"),
+  drop = FALSE
+]
+rownames(unique_settings) <- NULL
+
+primary_id <- sensitivity_map$setting_id[1]
+
+
+# Store replicate-level metrics for each unique parameter combination.
+sensitivity_results <- lapply(seq_len(nrow(unique_settings)), function(i) {
+  list(
+    bias_sim = array(NA_real_, dim = c(R, M, 5)),
+    mae_sim = array(NA_real_, dim = c(R, M, 5)),
+    mse_sim = array(NA_real_, dim = c(R, M, 5)),
+    rmse_sim = array(NA_real_, dim = c(R, M, 5)),
+    smape_sim = array(NA_real_, dim = c(R, M, 5)),
+    ci_cov_sim = array(NA_real_, dim = c(R, M, 5)),
+    ci_wide_sim = array(NA_real_, dim = c(R, M, 5))
+  )
+})
+
+
+# Primary-analysis outputs retained for Table 2, Table S13, and model selection.
+extremum_time_sim <- matrix(NA_real_, nrow = R, ncol = M)
+
+model_selection_sim <- matrix(
+  NA_integer_,
+  nrow = R,
+  ncol = M,
+  dimnames = list(NULL, transition_names)
+)
+
+table_s13_sim <- array(
+  NA_real_,
+  dim = c(R, M, 7L, 5L),
+  dimnames = list(
+    NULL,
+    transition_names,
+    paste0("model_", 1:7),
+    c("peak", "range", "rmse", "ci_cov", "ci_wid")
+  )
+)
+
+
+# Generate one weekly cohort per replicate and reuse it across all settings.
+for (r in 1:R) {
+  cohort_r <- generate_weekly_cohort(r)
+  
+  wide_data <- as.data.frame(
+    do.call(rbind, cohort_r$wide_data_list)
+  )
+  names(wide_data) <- paste0("t_", 0:K0)
+  x_list <- cohort_r$x_list
+  
+  for (setting_id in seq_len(nrow(unique_settings))) {
+    setting <- unique_settings[setting_id, ]
+    
+    data_all_sim <- run_one_sim(
+      seed = r * 1000L + setting_id,
+      wide_data = wide_data,
+      x_list = x_list,
+      K = as.integer(setting$K),
+      s0 = setting$s0,
+      lamstar = setting$lamstar
+    )
+    
+    data_all_r <- data_all_sim$data_all
+    data_all_model_r <- data_all_sim$data_all_model
+    
+    # Save primary-analysis curves and collect primary-only summaries.
+    if (setting_id == primary_id) {
+      data_all_r_csv <- do.call(
+        rbind,
+        lapply(seq_len(M), function(m) {
+          out <- data_all_r[[m]]
+          out$transition_path <- names(data_all_r)[m]
+          out
+        })
+      )
+      rownames(data_all_r_csv) <- NULL
+      
+      write.csv(
+        data_all_r_csv,
+        file.path(output_dir, paste0("data_all_", r, ".csv")),
+        row.names = FALSE
+      )
+      
+      for (m in 1:M) {
+        model_selection_sim[r, m] <-
+          data_all_r[[m]]$selected_model[1]
+        
+        dat_primary <- data_all_r[[m]][, c(2, 3, 6, 9, 12, 15)]
+        colnames(dat_primary) <- c(
+          "true", "bcmc", "cox", "tv", "rcs", "Crowther"
+        )
+        
+        extremum_time_sim[r, m] <- if (m == 2) {
+          which.max(dat_primary$bcmc)
+        } else {
+          which.min(dat_primary$bcmc)
+        }
+        
+        dat_model <- data_all_model_r[[m]]
+        
+        for (mod in 1:7) {
+          col <- mod * 3
+          
+          peak <- if (m == 2) {
+            which.max(dat_model[, col])
+          } else {
+            which.min(dat_model[, col])
+          }
+          
+          rang <- max(dat_model[, col], na.rm = TRUE) -
+            min(dat_model[, col], na.rm = TRUE)
+          
+          rmse <- sqrt(mean(
+            (dat_model[, 2] - dat_model[, col])^2,
+            na.rm = TRUE
+          ))
+          
+          ci_cov <- mean(
+            dat_model[, col + 1] <= dat_model[, 2] &
+              dat_model[, 2] <= dat_model[, col + 2],
+            na.rm = TRUE
+          )
+          
+          ci_wid <- mean(
+            abs(dat_model[, col + 1] - dat_model[, col + 2]),
+            na.rm = TRUE
+          )
+          
+          table_s13_sim[r, m, mod, ] <-
+            c(peak, rang, rmse, ci_cov, ci_wid)
+        }
+      }
+    }
+    
+    # Table 1 performance metrics for this parameter combination.
+    result <- sensitivity_results[[setting_id]]
+    
+    for (m in 1:M) {
+      dat <- data_all_r[[m]][, c(2, 3, 6, 9, 12, 15)]
+      colnames(dat) <- c(
+        "true", "bcmc", "cox", "tv", "rcs", "Crowther"
+      )
+      
+      ci_95 <- data_all_r[[m]][, c(
+        4, 5, 7, 8, 10, 11, 13, 14, 16, 17
+      )]
+      
+      est_list <- list(
+        dat$cox,
+        dat$tv,
+        dat$rcs,
+        dat$bcmc,
+        dat$Crowther
+      )
+      
+      lwr_list <- list(
+        ci_95[, 3],
+        ci_95[, 5],
+        ci_95[, 7],
+        ci_95[, 1],
+        ci_95[, 9]
+      )
+      
+      upr_list <- list(
+        ci_95[, 4],
+        ci_95[, 6],
+        ci_95[, 8],
+        ci_95[, 2],
+        ci_95[, 10]
+      )
+      
+      for (p_method in 1:5) {
+        metric <- curve_metrics(
+          true = dat$true,
+          est = est_list[[p_method]],
+          lwr = lwr_list[[p_method]],
+          upr = upr_list[[p_method]]
+        )
+        
+        result$bias_sim[r, m, p_method] <- metric["bias"]
+        result$mae_sim[r, m, p_method] <- metric["mae"]
+        result$mse_sim[r, m, p_method] <- metric["mse"]
+        result$rmse_sim[r, m, p_method] <- sqrt(metric["mse"])
+        result$smape_sim[r, m, p_method] <- metric["smape"]
+        result$ci_cov_sim[r, m, p_method] <- metric["coverage"]
+        result$ci_wide_sim[r, m, p_method] <- metric["width"]
+      }
+    }
+    
+    sensitivity_results[[setting_id]] <- result
+  }
+  
   message("Completed simulation replicate ", r, " of ", R)
 }
 
-bias <- 0
-bias_5 <- 0
-mae <- 0
-mse <- 0
-smape <- 0
-mae_5 <- 0
-mse_5 <- 0
-ci_cov <- 0
-ci_wide <- 0
-for(m in 1:M){
-  for(p_method in 1:4){
-    bias <- c(bias,mean(bias_sim[,m,p_method],na.rm=TRUE))
-    bias_5 <- c(bias_5,boot_ci(bias_sim[,m,p_method]))
-    mae <- c(mae,mean(mae_sim[,m,p_method],na.rm=TRUE))
-    mse <- c(mse,mean(mse_sim[,m,p_method],na.rm=TRUE))
-    smape <- c(smape,paste0(round(mean(smape_sim[,m,p_method],na.rm=TRUE),2),"%"))
-    mae_5 <- c(mae_5,boot_ci(mae_sim[,m,p_method]))
-    mse_5 <- c(mse_5,boot_ci(mse_sim[,m,p_method]))
-    ci_cov <- c(ci_cov,paste0(round(mean(ci_cov_sim[,m,p_method],na.rm=TRUE)*100,2),"%"))
-    ci_wide <- c(ci_wide,round(mean(ci_wide_sim[,m,p_method],na.rm=TRUE),2))
-  }
+
+# Summarize the replicate-level results for one parameter combination.
+summarize_setting <- function(setting_id, Sensitivity, Value) {
+  result <- sensitivity_results[[setting_id]]
+  
+  do.call(
+    rbind,
+    lapply(1:M, function(m) {
+      do.call(
+        rbind,
+        lapply(1:5, function(p_method) {
+          data.frame(
+            Sensitivity = Sensitivity,
+            Value = Value,
+            Transition = transition_names[m],
+            Method = method_names[p_method],
+            bias = mean(
+              result$bias_sim[, m, p_method],
+              na.rm = TRUE
+            ),
+            bias_5 = boot_ci(
+              result$bias_sim[, m, p_method]
+            ),
+            mae = mean(
+              result$mae_sim[, m, p_method],
+              na.rm = TRUE
+            ),
+            mae_5 = boot_ci(
+              result$mae_sim[, m, p_method]
+            ),
+            mse = mean(
+              result$mse_sim[, m, p_method],
+              na.rm = TRUE
+            ),
+            mse_5 = boot_ci(
+              result$mse_sim[, m, p_method]
+            ),
+            rmse = mean(
+              result$rmse_sim[, m, p_method],
+              na.rm = TRUE
+            ),
+            smape = paste0(
+              round(
+                mean(
+                  result$smape_sim[, m, p_method],
+                  na.rm = TRUE
+                ),
+                2
+              ),
+              "%"
+            ),
+            ci_cov = paste0(
+              round(
+                mean(
+                  result$ci_cov_sim[, m, p_method],
+                  na.rm = TRUE
+                ) * 100,
+                2
+              ),
+              "%"
+            ),
+            ci_wide = round(
+              mean(
+                result$ci_wide_sim[, m, p_method],
+                na.rm = TRUE
+              ),
+              2
+            ),
+            row.names = NULL
+          )
+        })
+      )
+    })
+  )
 }
-rmse <- sqrt(mse)
-out <- cbind(bias,bias_5,mae,mae_5,mse,mse_5,rmse,smape,ci_cov,ci_wide)[-1,]
-stopifnot(all(abs(as.numeric(out[,"bias"])) <= as.numeric(out[,"mae"]) + 1e-12))
-write.csv(out,"~/Desktop/BCMC_result/table_1_z.csv")
 
 
-model_names <- c("Weibull","Linear","Spline df=3","Spline df=4","Spline df=5","Spline df=6")
-selection_table <- do.call(rbind,lapply(1:M, function(m) {
-valid_selection <- model_selection_sim[, m]
-valid_selection <- valid_selection[!is.na(valid_selection)]
-counts <- table(factor(valid_selection,levels = 1:6))
-data.frame(
-  Scenario = scenario_name,
-  Transition = transition_names[m],
-  Model = model_names,
-  Count = as.integer(counts),
-  Selection_percentage =round(100 * as.integer(counts) / length(valid_selection), 2),
-  Successful_replicates = length(valid_selection)
+# Main Table 1: current primary-analysis settings.
+set.seed(20261031L)
+
+table_1_z <- summarize_setting(
+  setting_id = primary_id,
+  Sensitivity = "Primary",
+  Value = "Primary"
+)
+
+
+# Sensitivity table: one-factor-at-a-time settings.
+sensitivity_rows <- which(sensitivity_map$Sensitivity != "Primary")
+
+table_1_sensitivity <- do.call(
+  rbind,
+  lapply(sensitivity_rows, function(i) {
+    summarize_setting(
+      setting_id = sensitivity_map$setting_id[i],
+      Sensitivity = sensitivity_map$Sensitivity[i],
+      Value = sensitivity_map$Value[i]
     )
   })
 )
-print(selection_table)
-write.csv(selection_table,"~/Desktop/BCMC_result/selection_table.csv")
+
+
+# Save primary Table 1 and sensitivity results separately.
+write.csv(
+  table_1_z,
+  file.path(output_dir, "table_1_z.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  table_1_sensitivity,
+  file.path(output_dir, "table_1_sensitivity_K_s0_lamstar.csv"),
+  row.names = FALSE
+)
+
+
+# Table S13 summary from the primary-analysis settings.
+table_model_s13 <- do.call(
+  rbind,
+  lapply(1:M, function(m) {
+    do.call(
+      rbind,
+      lapply(1:7, function(mod) {
+        z <- colMeans(
+          table_s13_sim[, m, mod, , drop = FALSE],
+          na.rm = TRUE
+        )
+        
+        data.frame(
+          Transition = transition_names[m],
+          Model = model_names_s13[mod],
+          Extremum_time = round(z["peak"], 2),
+          HR_range = round(z["range"], 2),
+          RMSE = round(z["rmse"], 2),
+          CI_coverage = paste0(
+            round(z["ci_cov"] * 100, 2),
+            "%"
+          ),
+          CI_width = round(z["ci_wid"], 2),
+          row.names = NULL
+        )
+      })
+    )
+  })
+)
+
+write.csv(
+  table_model_s13,
+  file.path(output_dir, "table_s13.csv"),
+  row.names = FALSE
+)
+
+
+# Model-selection frequencies from the primary-analysis settings.
+model_names <- c(
+  "Weibull",
+  "Linear",
+  "Spline df=3",
+  "Spline df=4",
+  "Spline df=5",
+  "Spline df=6"
+)
+
+selection_table <- do.call(
+  rbind,
+  lapply(1:M, function(m) {
+    valid_selection <- model_selection_sim[, m]
+    valid_selection <- valid_selection[!is.na(valid_selection)]
+    counts <- table(factor(valid_selection, levels = 1:6))
+    
+    data.frame(
+      Scenario = scenario_name,
+      Transition = transition_names[m],
+      Model = model_names,
+      Count = as.integer(counts),
+      Selection_percentage = round(
+        100 * as.integer(counts) / length(valid_selection),
+        2
+      )
+    )
+  })
+)
+
+write.csv(
+  selection_table,
+  file.path(output_dir, "selection_table.csv"),
+  row.names = FALSE
+)
 
 writeLines(
   capture.output(sessionInfo()),
-  "~/Desktop/BCMC_result/sessionInfo.txt"
+  file.path(output_dir, "sessionInfo.txt")
 )
 end.rcode-->
-
-<p>Table_2<p>
-<!--begin.rcode
-# Table 2: BCMC peak/trough timing accuracy under the U-shaped scenario
-# Uses the same R independent simulation replicates as Table 1.
-
-stopifnot(
-  M == 4L,
-  K == 260L,
-  ncol(extremum_time_sim) == M,
-  all(extremum_time_sim >= 1 & extremum_time_sim <= K)
-)
-
-transition <- c("PFS-PD","PD-PFS","PFS-Death","PD-Death")
-
-extremum_type <- c("Trough","Peak","Trough","Trough")
-
-# Prespecified true extremum time under the U-shaped scenario
-true_time <- rep(130, M)
-
-# Verify that week 130 attains the prespecified true extremum
-# on the same evaluation grid used in Table 1.
-obser <- round((1:K) / K * K0)
-
-for (m in 1:M) {
-  true_curve <- exp(beta_true[m, obser])
-
-  stopifnot(all(is.finite(true_curve)))
-
-  true_extremum <- if (m == 2L) {
-    max(true_curve)
-  } else {
-    min(true_curve)
-  }
-
-  if (!isTRUE(all.equal(
-    as.numeric(true_curve[true_time[m]]),
-    as.numeric(true_extremum),
-    tolerance = 1e-8
-  ))) {
-    stop(
-      "Week 130 is not the prespecified true extremum for ",
-      transition[m],
-      ". Check that the current scenario is U-shaped."
-    )
-  }
-}
-
-mean_time <- numeric(M)
-time_lwr <- numeric(M)
-time_upr <- numeric(M)
-timing_mae <- numeric(M)
-
-for (m in 1:M) {
-  estimated_time <- extremum_time_sim[, m]
-  estimated_time <- estimated_time[is.finite(estimated_time)]
-
-  mean_time[m] <- mean(estimated_time)
-
-  time_quantile <- quantile(
-    estimated_time,
-    probs = c(0.025, 0.975),
-    names = FALSE,
-    type = 7
-  )
-
-  time_lwr[m] <- time_quantile[1]
-  time_upr[m] <- time_quantile[2]
-
-  timing_mae[m] <- mean(
-    abs(estimated_time - true_time[m])
-  )
-}
-
-table_2 <- data.frame(
-  Transition = transition,
-  `Extremum type` = extremum_type,
-  `True time (weeks)` = true_time,
-  `Mean estimated time, weeks (empirical 2.5th–97.5th percentile)` =
-    sprintf(
-      "%.2f (%.2f, %.2f)",
-      mean_time,
-      time_lwr,
-      time_upr
-    ),
-  `Timing MAE (weeks)` = round(timing_mae, 2),
-  check.names = FALSE
-)
-
-write.csv(table_2,paste0("~/Desktop/BCMC_result/norm/table_2.csv"))
-end.rcode-->
-
