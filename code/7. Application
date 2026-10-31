@@ -1,4 +1,5 @@
 <!--begin.rcode
+#6-month
 library(readr)
 library(haven)
 library(dplyr)
@@ -70,95 +71,535 @@ summary(cor)
 table(cor$V53)
 cor<-cor[,c(23:55)]#3-13wave hearing,3-13wave eyesight,3-13both impairment
 hrs_dat_original<-cbind(dat_hrs,cor)
+wide_data<-dat_hrs[,c(13:23)]
+hrs_dat_original <- hrs_dat_original[
+  !apply(wide_data == 3, 1, all),
+  ,
+  drop = FALSE
+]
 write.csv(hrs_dat_original,"~/Desktop/BCMC_result/hrs/hrs_dat_original.csv")
 
-for(R in 1:100){
-dat_hrs<-hrs_dat_original
-library(expm)
-p_list_s<- c(rep(0, 3*3*10))
-dim(p_list_s)<-c(3,3,10)
-dat<-dat_hrs[,13:23]
-for (i in 1:10){
-  p <- matrix(0, nrow = 3, ncol = 3)  
-  col_names <-c("NCI","MCI","DEM")
-  row_names <- c("NCI","MCI","DEM")
-  num<-length(which(dat[,i]==1))
-  p[1,1]<-length(which(dat[,i]==1&dat[,i+1]==1))/num
-  p[1,2]<-length(which(dat[,i]==1&dat[,i+1]==2))/num
-  p[1,3]<-length(which(dat[,i]==1&dat[,i+1]==3))/num
-  num2<-length(which(dat[,i]==2))
-  p[2,1]<-length(which(dat[,i]==2&dat[,i+1]==1))/num2
-  p[2,2]<-length(which(dat[,i]==2&dat[,i+1]==2))/num2
-  p[2,3]<-length(which(dat[,i]==2&dat[,i+1]==3))/num2
-  p[3,1]<-0
-  p[3,2]<-0
-  p[3,3]<-1
-  p_list_s[,,i]<-p
-}
-k<-40
-p_list_s_ste<- c(rep(0, 3*3*k))
-dim(p_list_s_ste)<-c(3,3,k)
-for (i in 1:10) {
-  p_step <- Re(sqrtm(sqrtm(p_list_s[, , i])))
-  p_step[p_step < 0] <- 0
+transition_names <- c( "NCI-MCI", "MCI-NCI", "NCI-DEM", "MCI-DEM")
+dat_hrs <- hrs_dat_original
+dat_state <- as.matrix(dat_hrs[, 13:23])
+storage.mode(dat_state) <- "numeric"
 
-  for (state_i in 1:3) {
-    row_total <- sum(p_step[state_i, ])
-    if (is.finite(row_total) && row_total > 0) {
-      p_step[state_i, ] <- p_step[state_i, ] / row_total
+p_list_s <- array(0, dim = c(3L, 3L, 10L))
+
+for (i in seq_len(10L)) {
+  state_from <- dat_state[, i]
+  state_to <- dat_state[, i + 1L]
+  p <- matrix(0, nrow = 3L, ncol = 3L)
+  # DEM 为吸收状态
+  p[3, 3] <- 1
+  # 估计 NCI 和 MCI 的转移概率；只用前后状态均有效的记录
+  for (state_i in 1:2) {
+    valid <- !is.na(state_from) & !is.na(state_to) &
+      state_from == state_i & state_to %in% 1:3
+    n_valid <- sum(valid)
+    if (n_valid > 0L) {
+      p[state_i, ] <- tabulate(
+        as.integer(state_to[valid]),
+        nbins = 3L
+      ) / n_valid
     } else {
-      p_step[state_i, ] <- diag(3)[state_i, ]
+      p[state_i, state_i] <- 1
+    }
+  }
+  p_list_s[, , i] <- p
+}
+
+# 对给定频率构造细化后的转移矩阵序列
+make_p_list_s_ste <- function(p_list_s, fre) {
+  if (!fre %in% c(24L, 6L, 3L)) {
+    stop("fre 只能取 24、6 或 3。")
+  }
+
+  n_sub <- 24L / fre
+  k <- 10L * n_sub
+  p_list_s_ste <- array(0, dim = c(3L, 3L, k))
+
+  for (i in seq_len(10L)) {
+    p_step <- p_list_s[, , i]
+
+    # fre=24: 不分解；fre=6: 四次根；fre=3: 八次根
+    if (n_sub > 1L) {
+      n_sqrt <- as.integer(log2(n_sub))
+      for (j in seq_len(n_sqrt)) {
+        p_step <- expm::sqrtm(p_step)
+      }
+      p_step <- Re(p_step)
+    }
+
+    # 清理数值误差并重新标准化每一行
+    p_step[p_step < 0] <- 0
+
+    for (state_i in 1:3) {
+      row_total <- sum(p_step[state_i, ])
+
+      if (is.finite(row_total) && row_total > 0) {
+        p_step[state_i, ] <- p_step[state_i, ] / row_total
+      } else {
+        p_step[state_i, ] <- diag(3)[state_i, ]
+      }
+    }
+
+    idx <- ((i - 1L) * n_sub + 1L):(i * n_sub)
+    p_list_s_ste[, , idx] <- array(
+      rep(p_step, n_sub),
+      dim = c(3L, 3L, n_sub)
+    )
+  }
+
+  p_list_s_ste
+}
+# 预先生成三种观测频率对应的转移矩阵序列
+fre <- 6L
+p_list_s_ste <- make_p_list_s_ste(p_list_s, fre)
+
+n <- nrow(dat_hrs)
+k <- dim(p_list_s_ste)[3]
+
+  # 每位受试者的协变量值在整个随访期保持不变
+  x_list <- list()
+  x_list[[1]] <- matrix(
+    rep(as.numeric(dat_hrs[, 46]), each = k + 1L),
+    nrow = n,
+    byrow = TRUE
+  )
+  names(x_list) <- "Covariate1"
+
+  # 模拟每名受试者在 k+1 个时间点的状态
+  data_1 <- matrix(NA_integer_, nrow = n, ncol = k + 1L)
+
+  for (i in seq_len(n)) {
+    current_state <- as.integer(dat_state[i, 1])
+
+    if (is.na(current_state) || !current_state %in% 1:3) {
+      stop("基线状态必须是 1、2 或 3。")
+    }
+
+    data_1[i, 1] <- current_state
+
+    for (t in seq_len(k)) {
+      current_prob <- p_list_s_ste[current_state, , t]
+      next_state <- sample.int(3L, size = 1L, prob = current_prob)
+
+      data_1[i, t + 1L] <- next_state
+      current_state <- next_state
     }
   }
 
-  p_list_s_ste[, , ((i - 1) * 4 + 1):((i - 1) * 4 + 4)] <- p_step
+  wide_data_1 <- as.data.frame(data_1)
+  colnames(wide_data_1) <- as.character(seq_len(k + 1L))
+
+  C1 <- data_sur_extract(wide_data_1, x_list, q)
+  data_sur <- C1
+
+  data_sur$y <- as.numeric(as.character(data_sur$y))
+  data_sur$m <- as.integer(as.character(data_sur$m))
+  data_sur$sigema <- as.integer(as.character(data_sur$sigema))
+  data_sur$X <- as.numeric(as.character(data_sur$X))
+
+  # 该频率下的区间数
+  K_fre <- k
+  HR_cox <- beta_of_HR_cox(data_sur, M)
+  HR_TV <- beta_of_HR_TV(data_sur, M, K_fre)
+  bcmc_result <- beta_of_bcmc(data_sur, M, K_fre, s0, lamstar)
+  beta_post <- bcmc_result$beta_post_all
+  bcmc <- beta_post[seq_len(K_fre),c(1:3, 6:8, 11:13, 16:18),drop = FALSE]
+  bcmc_posterior <- bcmc_result$bcmc_posterior
+  bcmc_wei <- beta_fit_wei(bcmc, bcmc_posterior, M, K_fre)
+  bcmc_lin <- beta_fit_lin(bcmc, bcmc_posterior, M, K_fre)
+  bcmc_splin_1 <- beta_fit_splin(bcmc, bcmc_posterior, M, K_fre, 3)
+  bcmc_splin_2 <- beta_fit_splin(bcmc, bcmc_posterior, M, K_fre, 4)
+  bcmc_splin_3 <- beta_fit_splin(bcmc, bcmc_posterior, M, K_fre, 5)
+  bcmc_splin_4 <- beta_fit_splin(bcmc, bcmc_posterior, M, K_fre, 6)
+
+  bcmc_fit_all <- list()
+  zbic_all_0 <- 0
+  selected_model <- integer(M)
+  for(m in 1:M){
+  col<-(m-1)*3+1
+  y0<-bcmc[,col]
+  bcmc_all<-list(bcmc_wei[[m]],bcmc_lin[[m]],bcmc_splin_1[[m]],bcmc_splin_2[[m]],bcmc_splin_3[[m]],bcmc_splin_4[[m]])
+  zbic_all <- c(0)
+    n_parm <- c(2,2,3,4,5,6)
+    for(mod in 1:6){
+      y1 <- as.vector(bcmc_all[[mod]][,1])
+      zbic0 <- zbic(y0,log(y1),n_parm[mod],tau=log(1.25))
+      zbic_all <- c(zbic_all,zbic0)
+    }
+    zbic_all_0 <- rbind(zbic_all_0,c(zbic_all[-1],which.min(zbic_all[-1])))
+    best_mod <- which.min(zbic_all[-1])
+    selected_model[m] <- best_mod
+    bcmc_fit_all[[m]] <- bcmc_all[[best_mod]]
 }
-
-
-
-k<-40
-plot(1:k, p_list_s_ste[1,2,1:k], type="l", col="steelblue2", ylim=c(0,0.1), xlab="Wave", ylab="P", main="Probability",bty = "l")
-lines(1:k, p_list_s_ste[2,1,1:k], type="l", col="purple")
-lines(1:k, p_list_s_ste[1,3,1:k], type="l", col="palegreen3")
-lines(1:k, p_list_s_ste[2,3,1:k], type="l", col="gold1")
-legend("topright", legend=c("NCI-CIND", "CIND-NCI","NCI-Dementia","CIND-Dementia"), col=c("steelblue2", "purple", "palegreen3", "gold1"), lty=1, cex=0.8, bty = "n")
-
-library(foreach)
-library(iterators)
-library(parallel)
-library(doParallel)
-states<- 3  # number of states
-n<-dim(dat)[1] # The number of samples 
-cl <- makeCluster(7) 
-registerDoParallel(cl)
-#1. Repeat the cycle to generate sample data _ control group
-data_1<-foreach(i = 1:n,
-               .combine = rbind,
-               .errorhandling = "pass") %dopar% {
-  current_state <- dat$V13[i]
-  da<-c(current_state)
-  # Store sample sequences
-  for(t in 1:k){
-    next_state <- sample(1:states, 1, prob = p_list_s_ste[current_state,,t])
-  da<- c(da,next_state)
-  current_state<-next_state
+  data_all_6 <- vector("list", M)
+  for(m in 1:M){
+    y_cox <- cbind(rep(as.numeric(HR_cox[m,1]),K),rep(as.numeric(HR_cox[m,2]),K),rep(as.numeric(HR_cox[m,3]),K))
+    colnames(y_cox) <- c("cox","cox_lwr","cox_upr")
+    col <- (m-1)*3+1
+    y_tv <- cbind(HR_TV[,col],HR_TV[,col+1],HR_TV[,col+2])
+    colnames(y_tv) <- c("tv","tv_lwr","tv_upr")
+    x <- data.frame(x = 1:K_fre)
+    data_all_6[[m]] <- cbind(x,bcmc_fit_all[[m]],y_cox,y_tv)
   }
-  return(da)
-               }
-stopCluster(cl)
-wide_data_1<- as.data.frame(data_1)
-colnames(wide_data_1)<-c(1:(k+1))
-write.csv(wide_data_1,paste0("~/Desktop/BCMC_result/hrs/wide_data_",R,".csv"))
+  names(data_all_6) <- transition_names
+  write.csv(data_all_6,paste0("~/Desktop/BCMC_result/hrs/data_all_6.csv"))
+end.rcode-->
 
-#3. Extracted  survival time data
-x_list <- list()
-x_list[[1]] <- t(apply(dat_hrs[, 46],1,function(x) rep(x, each = 41)))
-n # The number of samples
-q<-1
-C1<-data_sur_extract(wide_data_1,x_list,q)
+# sensitivity analysis of observation frequency of data twin
+<!--begin.rcode
+library(expm)
 
-C_2<-C1[which((C1$m==1)|(C1$m==5)),]
-C_2[which(C_2$m==5),3]<-2
-write.csv(C_2,paste0("~/Desktop/BCMC_result/hrs/data_sur_",R,".csv"))
+R <- 100L
+M <- 4L
+fre_values <- c(24L, 6L, 3L)
+
+transition_names <- c(
+  "NCI-MCI", "MCI-NCI", "NCI-DEM", "MCI-DEM"
+)
+
+# 从 HRS 状态序列估计 10 个两年间隔的转移矩阵
+dat_hrs <- hrs_dat_original
+dat_state <- as.matrix(dat_hrs[, 13:23])
+storage.mode(dat_state) <- "numeric"
+
+p_list_s <- array(0, dim = c(3L, 3L, 10L))
+
+for (i in seq_len(10L)) {
+  state_from <- dat_state[, i]
+  state_to <- dat_state[, i + 1L]
+  p <- matrix(0, nrow = 3L, ncol = 3L)
+
+  # DEM 为吸收状态
+  p[3, 3] <- 1
+
+  # 估计 NCI、MCI 的转移概率，仅使用前后状态有效的记录
+  for (state_i in 1:2) {
+    valid <- !is.na(state_from) &
+      !is.na(state_to) &
+      state_from == state_i &
+      state_to %in% 1:3
+
+    n_valid <- sum(valid)
+
+    if (n_valid > 0L) {
+      p[state_i, ] <- tabulate(
+        as.integer(state_to[valid]),
+        nbins = 3L
+      ) / n_valid
+    } else {
+      p[state_i, state_i] <- 1
+    }
+  }
+
+  p_list_s[, , i] <- p
 }
+
+# 生成不同观测频率下的转移矩阵序列
+make_p_list_s_ste <- function(p_list_s, fre) {
+  if (!fre %in% c(24L, 6L, 3L)) {
+    stop("fre 只能取 24、6 或 3。")
+  }
+
+  n_sub <- 24L / fre
+  k <- 10L * n_sub
+  p_list_s_ste <- array(0, dim = c(3L, 3L, k))
+
+  for (i in seq_len(10L)) {
+    p_step <- p_list_s[, , i]
+
+    # fre=24 不分解；fre=6 取四次根；fre=3 取八次根
+    if (n_sub > 1L) {
+      n_sqrt <- as.integer(log2(n_sub))
+
+      for (j in seq_len(n_sqrt)) {
+        p_step <- expm::sqrtm(p_step)
+      }
+
+      p_step <- Re(p_step)
+    }
+
+    # 清理负值并按行归一化
+    p_step[p_step < 0] <- 0
+
+    for (state_i in 1:3) {
+      row_total <- sum(p_step[state_i, ])
+
+      if (is.finite(row_total) && row_total > 0) {
+        p_step[state_i, ] <- p_step[state_i, ] / row_total
+      } else {
+        p_step[state_i, ] <- diag(3)[state_i, ]
+      }
+    }
+
+    idx <- ((i - 1L) * n_sub + 1L):(i * n_sub)
+
+    p_list_s_ste[, , idx] <- array(
+      rep(p_step, n_sub),
+      dim = c(3L, 3L, n_sub)
+    )
+  }
+
+  p_list_s_ste
+}
+
+p_list_s_ste_by_fre <- lapply(
+  fre_values,
+  function(fre) make_p_list_s_ste(p_list_s, fre)
+)
+names(p_list_s_ste_by_fre) <- as.character(fre_values)
+
+# 每次生成一个 data twin 并拟合模型
+run_one_sim_hrs <- function(seed, fre, p_list_s_ste) {
+  set.seed(seed)
+
+  n <- nrow(dat_hrs)
+  k <- dim(p_list_s_ste)[3]
+
+  # 每位受试者的协变量值在随访期间保持不变，
+  # 因此重复 k+1 次，与状态序列列数一致
+  x_list <- list()
+  x_list[[1]] <- matrix(
+    rep(as.numeric(dat_hrs[, 46]), each = k + 1L),
+    nrow = n,
+    byrow = TRUE
+  )
+  names(x_list) <- "Covariate1"
+
+  # 模拟每名受试者在 k+1 个时间点的状态
+  data_1 <- matrix(NA_integer_, nrow = n, ncol = k + 1L)
+
+  for (i in seq_len(n)) {
+    current_state <- as.integer(dat_state[i, 1])
+
+    if (is.na(current_state) || !current_state %in% 1:3) {
+      stop("基线状态必须是 1、2 或 3。")
+    }
+
+    data_1[i, 1] <- current_state
+
+    for (t in seq_len(k)) {
+      current_prob <- p_list_s_ste[current_state, , t]
+
+      next_state <- sample.int(
+        n = 3L,
+        size = 1L,
+        prob = current_prob
+      )
+
+      data_1[i, t + 1L] <- next_state
+      current_state <- next_state
+    }
+  }
+
+  wide_data_1 <- as.data.frame(data_1)
+  colnames(wide_data_1) <- as.character(seq_len(k + 1L))
+
+  C1 <- data_sur_extract(wide_data_1, x_list, q)
+  data_sur <- C1
+
+  data_sur$y <- as.numeric(as.character(data_sur$y))
+  data_sur$m <- as.integer(as.character(data_sur$m))
+  data_sur$sigema <- as.integer(as.character(data_sur$sigema))
+  data_sur$X <- as.numeric(as.character(data_sur$X))
+
+  K_fre <- k
+
+  HR_cox <- beta_of_HR_cox(data_sur, M)
+
+  bcmc_result <- beta_of_bcmc(
+    data_sur, M, K_fre, s0, lamstar
+  )
+
+  beta_post <- bcmc_result$beta_post_all
+  bcmc_posterior <- bcmc_result$bcmc_posterior
+
+  bcmc <- beta_post[
+    seq_len(K_fre),
+    c(1:3, 6:8, 11:13, 16:18),
+    drop = FALSE
+  ]
+
+  bcmc_wei <- beta_fit_wei(bcmc, bcmc_posterior, M, K_fre)
+  bcmc_lin <- beta_fit_lin(bcmc, bcmc_posterior, M, K_fre)
+  bcmc_splin_1 <- beta_fit_splin(bcmc, bcmc_posterior, M, K_fre, 3)
+  bcmc_splin_2 <- beta_fit_splin(bcmc, bcmc_posterior, M, K_fre, 4)
+  bcmc_splin_3 <- beta_fit_splin(bcmc, bcmc_posterior, M, K_fre, 5)
+  bcmc_splin_4 <- beta_fit_splin(bcmc, bcmc_posterior, M, K_fre, 6)
+
+  bcmc_fit_all <- vector("list", M)
+  selected_model <- integer(M)
+
+  for (m in seq_len(M)) {
+    col <- (m - 1L) * 3L + 1L
+    y0 <- bcmc[, col]
+
+    bcmc_all <- list(
+      bcmc_wei[[m]],
+      bcmc_lin[[m]],
+      bcmc_splin_1[[m]],
+      bcmc_splin_2[[m]],
+      bcmc_splin_3[[m]],
+      bcmc_splin_4[[m]]
+    )
+
+    n_parm <- c(2, 2, 3, 4, 5, 6)
+    zbic_all <- rep(NA_real_, 6L)
+
+    for (mod in seq_len(6L)) {
+      y1 <- as.numeric(bcmc_all[[mod]][, 1])
+
+      zbic_all[mod] <- zbic(
+        y0,
+        log(y1),
+        n_parm[mod],
+        tau = log(1.25)
+      )
+    }
+
+    best_mod <- which.min(zbic_all)
+    selected_model[m] <- best_mod
+    bcmc_fit_all[[m]] <- bcmc_all[[best_mod]]
+  }
+
+  # 每个 data_all list 的第 3 列是 BCMC HR
+  data_all <- vector("list", M)
+
+  for (m in seq_len(M)) {
+    fit <- as.matrix(bcmc_fit_all[[m]])
+
+    if (nrow(fit) != K_fre || ncol(fit) < 3L) {
+      stop("BCMC 平滑结果与当前频率的时间网格不一致。")
+    }
+
+    data_all[[m]] <- data.frame(
+      time_index = seq_len(K_fre),
+      bcmc_lwr = fit[, 2],
+      bcmc_HR = fit[, 1],
+      bcmc_upr = fit[, 3],
+      Fre_Cox_HR = rep(as.numeric(HR_cox[m, 1]), K_fre),
+      Fre_Cox_lwr = rep(as.numeric(HR_cox[m, 2]), K_fre),
+      Fre_Cox_upr = rep(as.numeric(HR_cox[m, 3]), K_fre)
+    )
+  }
+
+  names(data_all) <- transition_names
+  data_all
+}
+
+# 三种频率分别运行 100 次
+all_data_all <- setNames(
+  vector("list", length(fre_values)),
+  as.character(fre_values)
+)
+
+result_rows <- list()
+result_index <- 0L
+seed_base <- 20261030L
+
+for (fre in fre_values) {
+  p_current <- p_list_s_ste_by_fre[[as.character(fre)]]
+  all_data_all[[as.character(fre)]] <- vector("list", R)
+
+  for (r in seq_len(R)) {
+    sim_result <- run_one_sim_hrs(
+      seed = seed_base + fre * 1000L + r,
+      fre = fre,
+      p_list_s_ste = p_current
+    )
+
+    all_data_all[[as.character(fre)]][[r]] <- sim_result
+
+    for (m in seq_len(M)) {
+      dat <- sim_result[[m]]
+
+      # BCMC HR 位于每个 data_all list 的第 3 列
+      bcmc_hr <- as.numeric(dat[, 3])
+
+      extremum_index <- if (m == 2L) {which.min(bcmc_hr)} else {which.max(bcmc_hr)}
+
+      result_index <- result_index + 1L
+
+      result_rows[[result_index]] <- data.frame(
+        fre = fre,
+        replicate = r,
+        transition = transition_names[m],
+
+        extremum_HR = bcmc_hr[extremum_index],
+        extremum_time_years = extremum_index * fre / 12,
+
+        # 每次循环的 range 定义为 max(HR) - min(HR)
+        HR_range = max(bcmc_hr, na.rm = TRUE) -
+          min(bcmc_hr, na.rm = TRUE),
+
+        Fre_Cox_HR = dat$Fre_Cox_HR[1],
+        Fre_Cox_lwr = dat$Fre_Cox_lwr[1],
+        Fre_Cox_upr = dat$Fre_Cox_upr[1]
+      )
+    }
+  }
+}
+
+results_100 <- do.call(rbind, result_rows)
+rownames(results_100) <- NULL
+
+# 汇总 100 次循环：均值和 2.5%、97.5% 分位数
+summary_rows <- list()
+summary_index <- 0L
+
+for (fre in fre_values) {
+  for (m in seq_len(M)) {
+    z <- results_100[
+      results_100$fre == fre &
+        results_100$transition == transition_names[m],
+      ,
+      drop = FALSE
+    ]
+
+    summary_index <- summary_index + 1L
+
+    summary_rows[[summary_index]] <- data.frame(
+      fre = fre,
+      transition = transition_names[m],
+
+      extremum_HR_mean = mean(z$extremum_HR, na.rm = TRUE),
+      extremum_HR_q025 = unname(
+        quantile(z$extremum_HR, 0.025, na.rm = TRUE)
+      ),
+      extremum_HR_q975 = unname(
+        quantile(z$extremum_HR, 0.975, na.rm = TRUE)
+      ),
+
+      extremum_time_years_mean =
+        mean(z$extremum_time_years, na.rm = TRUE),
+      extremum_time_years_q025 = unname(
+        quantile(z$extremum_time_years, 0.025, na.rm = TRUE)
+      ),
+      extremum_time_years_q975 = unname(
+        quantile(z$extremum_time_years, 0.975, na.rm = TRUE)
+      ),
+
+      # 这是 100 个 max(HR)-min(HR) 的均值和经验分位数
+      HR_range_mean = mean(z$HR_range, na.rm = TRUE),
+      HR_range_q025 = unname(
+        quantile(z$HR_range, 0.025, na.rm = TRUE)
+      ),
+      HR_range_q975 = unname(
+        quantile(z$HR_range, 0.975, na.rm = TRUE)
+      ),
+
+      Fre_Cox_HR_mean = mean(z$Fre_Cox_HR, na.rm = TRUE),
+      Fre_Cox_lwr_mean = mean(z$Fre_Cox_lwr, na.rm = TRUE),
+      Fre_Cox_upr_mean = mean(z$Fre_Cox_upr, na.rm = TRUE)
+    )
+  }
+}
+
+summary_100 <- do.call(rbind, summary_rows)
+rownames(summary_100) <- NULL
+
+write.csv(summary_100,paste0("~/Desktop/BCMC_result/hrs/table_s_obefre.csv"))
 end.rcode-->
